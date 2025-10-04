@@ -1,0 +1,5 @@
+streamlit
+biopython
+pydantic
+groq
+requests
