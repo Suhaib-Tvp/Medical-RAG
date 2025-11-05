@@ -3,7 +3,10 @@ from pydantic import BaseModel, Field
 from typing import List
 import json
 
-# Pydantic models
+# =====================
+# PYDANTIC MODELS
+# =====================
+
 class Question(BaseModel):
     topics: List[str] = Field(
         default=[], 
@@ -11,15 +14,21 @@ class Question(BaseModel):
         description="Extracted medical topics from the question"
     )
 
+
 class Triple(BaseModel):
     head: str = Field(..., description="Subject of the relation")
     predicate: str = Field(..., description="Relationship type")
     tail: str = Field(..., description="Object of the relation")
 
+
 class Triples(BaseModel):
     triples: List[Triple] = Field(default=[], description="List of knowledge triples")
 
-# Base processor class
+
+# =====================
+# BASE PROCESSOR CLASS
+# =====================
+
 class Llama3Processor:
     def __init__(self, api_key: str):
         self.client = Groq(api_key=api_key)
@@ -30,14 +39,7 @@ class Llama3Processor:
     def prompt_llama3(self, text: str) -> str:
         """
         Send prompt to Llama 3.3 and get structured JSON response.
-        
-        Args:
-            text (str): Input text to process
-            
-        Returns:
-            str: JSON formatted response
         """
-        # Limit text to avoid token overflow
         text = text[:2000]
         user_input = f"{self.user_input}:\n{text}"
         
@@ -45,8 +47,8 @@ class Llama3Processor:
             schema = self.response_model.model_json_schema()
         except:
             schema = self.response_model.schema()
-            
-        format_instructions = f"Return valid JSON matching this schema: {json.dumps(schema)}"
+        
+        format_instructions = f"Return valid JSON: {json.dumps(schema)}"
         
         try:
             response = self.client.chat.completions.create(
@@ -54,7 +56,7 @@ class Llama3Processor:
                 messages=[
                     {
                         "role": "system",
-                        "content": f"{self.system_prompt}\n\nIMPORTANT: Respond with ONLY valid JSON, no markdown, no extra text."
+                        "content": f"{self.system_prompt}\n\nRespond with ONLY valid JSON."
                     },
                     {
                         "role": "user",
@@ -67,78 +69,64 @@ class Llama3Processor:
             
             content = response.choices[0].message.content.strip()
             
-            # Remove markdown code blocks if present
+            # Remove markdown blocks
             if content.startswith('```
-                lines = content.split('\n')
-                content = '\n'.join(lines[1:-1]) if len(lines) > 2 else content
-            
-            # Clean up potential markdown
-            if 'json' in content[:10]:
                 content = content.replace('```json', '').replace('```
             
-            content = content.strip()
-            
-            # Parse JSON
             parsed_json = json.loads(content)
             
-            # Validate with Pydantic
             try:
                 parsed = self.response_model.model_validate(parsed_json)
-            except:
-                parsed = self.response_model(**parsed_json)
-            
-            try:
                 return parsed.model_dump_json()
             except:
-                return json.dumps(parsed.dict())
-            
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] JSON parsing failed: {e}")
-            print(f"[ERROR] Content: {content[:200]}")
-            # Return empty structure
+                return json.dumps(parsed_json)
+        
+        except json.JSONDecodeError:
             if self.response_model == Question:
                 return json.dumps({"topics": []})
             elif self.response_model == Triples:
                 return json.dumps({"triples": []})
             return "{}"
-            
+        
         except Exception as e:
-            print(f"[ERROR] Error in prompt_llama3: {e}")
-            # Return empty structure if error
+            print(f"Error: {e}")
             if self.response_model == Question:
                 return json.dumps({"topics": []})
             elif self.response_model == Triples:
                 return json.dumps({"triples": []})
             return "{}"
 
-# Topic extraction processor
+
+# =====================
+# TOPIC EXTRACTION
+# =====================
+
 class Llama3ExtractTopicFromText(Llama3Processor):
     def __init__(self, api_key: str):
         super().__init__(api_key)
         self.system_prompt = (
-            "You are a medical topic extraction expert. Extract key medical topics from the user's question. "
-            "Focus on specific conditions, treatments, and relevant subtopics. "
-            "Always return valid JSON."
+            "Extract medical topics from the question. "
+            "Focus on diseases, treatments, and conditions."
         )
         self.user_input = (
-            "Extract medical topics from this question. "
-            "Return JSON: {\"topics\": [\"topic1\", \"topic2\", ...]}"
+            "Extract topics. Return JSON: {\"topics\": [\"topic1\", \"topic2\"]}"
         )
         self.response_model = Question
 
-# Relations extraction processor
+
+# =====================
+# RELATIONS EXTRACTION
+# =====================
+
 class Llama3ExtractRelationsFromText(Llama3Processor):
     def __init__(self, api_key: str):
         super().__init__(api_key)
         self.system_prompt = (
-            "You are a medical knowledge extraction expert. Extract medical relationships from medical text. "
-            "Identify diseases, treatments, drugs, symptoms, and their relationships. "
-            "Return triples in JSON format. Always respond with valid JSON only."
+            "Extract medical relationships from text. "
+            "Identify diseases, treatments, drugs, and relationships."
         )
         self.user_input = (
-            "Extract medical relationships from this text. "
-            "Return JSON: {\"triples\": [{\"head\": \"subject\", \"predicate\": \"relationship\", \"tail\": \"object\"}, ...]}. "
-            "Focus on: treats, causes, associated_with, risk_factor_for, prevents, reduces. "
-            "Extract at least 2-5 relationships."
+            "Extract relationships. "
+            "Return JSON: {\"triples\": [{\"head\": \"X\", \"predicate\": \"Y\", \"tail\": \"Z\"}]}"
         )
         self.response_model = Triples
