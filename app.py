@@ -12,6 +12,32 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# CRITICAL FIX: Patch httpx Client BEFORE importing groq
+import httpx
+
+# Save original Client class
+_OriginalClient = httpx.Client
+
+# Create patched Client that filters out proxies argument
+class _PatchedClient(_OriginalClient):
+    def __init__(self, *args, **kwargs):
+        # Remove problematic proxy-related arguments
+        kwargs.pop('proxies', None)
+        kwargs.pop('proxy', None)
+        kwargs.pop('mounts', None)
+        super().__init__(*args, **kwargs)
+
+# Replace httpx.Client globally
+httpx.Client = _PatchedClient
+
+# NOW it's safe to import groq (after httpx is patched)
+from groq import Groq
+
+# Import other modules
+from pubmed_scraper import get_pubmed_term_entries, get_abstracts_text
+from llama_processor import Llama3ExtractTopicFromText, Llama3ExtractRelationsFromText
+from evaluation import RAGEvaluator
+
 # Custom CSS
 st.markdown("""
 <style>
@@ -45,61 +71,24 @@ if 'evaluation_results' not in st.session_state:
 if 'knowledge_graph' not in st.session_state:
     st.session_state.knowledge_graph = []
 
-# Initialize clients with bulletproof error handling
+# Initialize clients - NOW THIS WILL WORK
 @st.cache_resource
 def initialize_clients():
     """Initialize Groq client and processors with API key from secrets"""
     try:
         api_key = st.secrets["GROQ_API_KEY"]
         
-        # Import inside function to avoid circular imports
-        from groq import Groq as OriginalGroq
-        from pubmed_scraper import get_pubmed_term_entries, get_abstracts_text
-        from llama_processor import Llama3ExtractTopicFromText, Llama3ExtractRelationsFromText
-        from evaluation import RAGEvaluator
-        
-        # Wrapper to handle proxies parameter issue
-        class SafeGroqClient:
-            def __init__(self, api_key):
-                self.api_key = api_key
-                self._client = None
-                self._initialize_client()
-            
-            def _initialize_client(self):
-                """Initialize Groq client with error handling for proxies"""
-                try:
-                    self._client = OriginalGroq(api_key=self.api_key)
-                except TypeError as e:
-                    if 'proxies' in str(e):
-                        # Patch the __init__ to remove proxies
-                        import inspect
-                        original_init = OriginalGroq.__init__
-                        
-                        def new_init(self, *args, **kwargs):
-                            # Remove proxies from kwargs if present
-                            kwargs.pop('proxies', None)
-                            kwargs.pop('proxy', None)
-                            original_init(self, *args, **kwargs)
-                        
-                        OriginalGroq.__init__ = new_init
-                        self._client = OriginalGroq(api_key=self.api_key)
-                    else:
-                        raise
-            
-            def __getattr__(self, name):
-                """Delegate all attributes to the wrapped client"""
-                return getattr(self._client, name)
-        
-        client = SafeGroqClient(api_key)
+        # Create clients (httpx is already patched, so this works)
+        client = Groq(api_key=api_key)
         topic_extractor = Llama3ExtractTopicFromText(api_key)
         relations_extractor = Llama3ExtractRelationsFromText(api_key)
         evaluator = RAGEvaluator(api_key)
         
-        return client, topic_extractor, relations_extractor, evaluator, get_pubmed_term_entries, get_abstracts_text
+        return client, topic_extractor, relations_extractor, evaluator
         
     except KeyError:
-        st.error("❌ GROQ_API_KEY not found in secrets. Please add it in Streamlit Cloud settings.")
-        st.info("Go to: App Menu → Settings → Secrets")
+        st.error("❌ GROQ_API_KEY not found in secrets.")
+        st.info("Go to: App Menu → Settings → Secrets and add your Groq API key")
         st.stop()
     except Exception as e:
         st.error(f"❌ Error initializing clients: {str(e)}")
@@ -107,7 +96,8 @@ def initialize_clients():
         st.code(traceback.format_exc())
         st.stop()
 
-client, topic_extractor, relations_extractor, evaluator, get_pubmed_term_entries, get_abstracts_text = initialize_clients()
+# Initialize all clients
+client, topic_extractor, relations_extractor, evaluator = initialize_clients()
 
 # Sidebar
 with st.sidebar:
@@ -143,6 +133,7 @@ with st.sidebar:
     - Non-pharmacological interventions for Type 2 Diabetes?
     - Recent advances in cardiovascular disease prevention?
     - Hypertension management in chronic kidney disease?
+    - Side effects of ACE inhibitors?
     """)
     
     if st.button("🗑️ Clear Chat History", use_container_width=True):
@@ -185,7 +176,7 @@ with tab1:
     with st.form(key="query_form", clear_on_submit=True):
         user_query = st.text_area(
             "🔍 Ask a medical question:",
-            placeholder="e.g., What are the latest recommended non-pharmacological interventions for managing hypertension in elderly patients?",
+            placeholder="e.g., What are the latest recommended non-pharmacological interventions for managing hypertension?",
             height=100
         )
         submit_button = st.form_submit_button("🚀 Search & Generate Answer", use_container_width=True)
@@ -193,7 +184,6 @@ with tab1:
     if submit_button and user_query:
         with st.spinner("🔬 Processing your query..."):
             try:
-                # Progress tracking
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
@@ -236,16 +226,14 @@ with tab1:
                         {
                             "role": "system",
                             "content": (
-                                "You are Kelly, a medical expert AI assistant providing evidence-based information. "
-                                "You have access to structured knowledge from recent medical literature. "
-                                "Use this as a factual foundation while supplementing with relevant medical knowledge. "
-                                "Prioritize accuracy, provide clear explanations, and give actionable insights."
+                                "You are Kelly, a medical expert AI assistant. "
+                                "Provide evidence-based information using structured knowledge from medical literature. "
+                                "Be clear, accurate, and actionable in your responses."
                             ),
                         },
                         {
                             "role": "user",
-                            "content": f"Question: {user_query}\n\nRelevant knowledge:\n{all_relations}\n\n"
-                                       f"Provide a comprehensive, evidence-based answer."
+                            "content": f"Question: {user_query}\n\nMedical knowledge:\n{all_relations}\n\nProvide a comprehensive answer."
                         }
                     ],
                     temperature=0.3,
@@ -267,7 +255,7 @@ with tab1:
                     )
                 
                 progress_bar.progress(100)
-                status_text.text("✅ Complete!")
+                status_text.text("✅ Step 5/5: Complete!")
                 time.sleep(0.5)
                 progress_bar.empty()
                 status_text.empty()
@@ -288,47 +276,106 @@ with tab1:
                 st.rerun()
                 
             except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
+                st.error(f"❌ Error processing query: {str(e)}")
                 import traceback
                 st.code(traceback.format_exc())
 
 with tab2:
     st.markdown("## 📊 RAG Evaluation Metrics")
+    st.markdown("""
+    Assessment of RAG system quality:
+    - **Faithfulness** (0-1): Factual consistency with retrieved context
+    - **Answer Relevancy** (0-1): Alignment with the question
+    - **Context Precision** (0-1): Quality of retrieved documents
+    """)
     
     if st.session_state.evaluation_results:
         latest_eval = st.session_state.evaluation_results[-1]
         
+        st.markdown("### 🎯 Latest Query Metrics")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Faithfulness", f"{latest_eval['faithfulness']:.3f}")
-        col2.metric("Relevancy", f"{latest_eval['answer_relevancy']:.3f}")
-        col3.metric("Precision", f"{latest_eval['context_precision']:.3f}")
-        col4.metric("Overall", f"{latest_eval['overall_score']:.3f}")
+        
+        with col1:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Faithfulness", f"{latest_eval['faithfulness']:.3f}")
+            st.caption("Factual consistency")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Relevancy", f"{latest_eval['answer_relevancy']:.3f}")
+            st.caption("Query alignment")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Precision", f"{latest_eval['context_precision']:.3f}")
+            st.caption("Retrieval quality")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col4:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Overall Score", f"{latest_eval['overall_score']:.3f}")
+            st.caption("Average metric")
+            st.markdown('</div>', unsafe_allow_html=True)
         
         if len(st.session_state.evaluation_results) > 1:
-            st.markdown("### Historical Performance")
+            st.markdown("### 📈 Historical Performance")
             df = pd.DataFrame(st.session_state.evaluation_results)
             df['Query'] = range(1, len(df) + 1)
-            chart_data = df[['Query', 'faithfulness', 'answer_relevancy', 'context_precision']].set_index('Query')
+            chart_data = df[['Query', 'faithfulness', 'answer_relevancy', 'context_precision', 'overall_score']].set_index('Query')
             st.line_chart(chart_data)
+            
+            st.markdown("### 📋 Summary Statistics")
+            summary_df = df[['faithfulness', 'answer_relevancy', 'context_precision', 'overall_score']].describe()
+            st.dataframe(summary_df, use_container_width=True)
     else:
-        st.info("No evaluation data yet.")
+        st.info("📝 No evaluation data yet. Ask a question to see metrics.")
 
 with tab3:
     st.markdown("## 🕸️ Medical Knowledge Graph")
+    st.markdown("Structured medical relationships extracted from PubMed literature")
     
     if st.session_state.knowledge_graph:
+        st.markdown("### 📊 Knowledge Graph Statistics")
+        col1, col2, col3 = st.columns(3)
+        
         df_kg = pd.DataFrame(st.session_state.knowledge_graph)
-        st.dataframe(df_kg, use_container_width=True)
+        col1.metric("Total Triples", len(df_kg))
+        col2.metric("Unique Subjects", df_kg['head'].nunique())
+        col3.metric("Unique Relations", df_kg['predicate'].nunique())
+        
+        st.markdown("### 📋 Knowledge Triples")
+        st.dataframe(
+            df_kg,
+            use_container_width=True,
+            column_config={
+                "head": st.column_config.TextColumn("Subject", width="medium"),
+                "predicate": st.column_config.TextColumn("Relationship", width="medium"),
+                "tail": st.column_config.TextColumn("Object", width="medium")
+            }
+        )
+        
+        st.markdown("### 🔗 Relationship Distribution")
+        relation_counts = df_kg['predicate'].value_counts()
+        st.bar_chart(relation_counts)
         
         csv = df_kg.to_csv(index=False).encode('utf-8')
         st.download_button(
-            "📥 Download CSV",
+            label="📥 Download Knowledge Graph as CSV",
             data=csv,
-            file_name="knowledge_graph.csv",
-            mime="text/csv"
+            file_name="medical_knowledge_graph.csv",
+            mime="text/csv",
+            use_container_width=True
         )
     else:
-        st.info("No knowledge graph data yet.")
+        st.info("📝 No knowledge graph yet. Ask a medical question to build it!")
 
+# Footer
 st.markdown("---")
-st.caption("⚠️ Medical Disclaimer: Not a substitute for professional medical advice.")
+st.markdown("""
+<div style='text-align: center; color: #6B7280; font-size: 0.9rem;'>
+    <p>⚠️ <strong>Medical Disclaimer:</strong> This AI provides information from literature but is <strong>not a substitute for professional medical advice</strong>.</p>
+    <p>🔬 Data: PubMed (NCBI) | 🤖 Model: Llama 3.3 70B (Groq) | 🎨 Built with Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
