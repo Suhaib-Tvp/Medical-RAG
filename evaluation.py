@@ -29,41 +29,77 @@ class RAGEvaluator:
             if not contexts or not answer:
                 return 0.5
             
-            combined_context = "\n".join(contexts[:3])  # Use first 3 contexts
+            # Use only first 2 contexts to avoid token limits
+            combined_context = "\n\n".join(contexts[:2])
             
-            prompt = f"""Evaluate if the following answer is factually consistent with the provided context.
-            
-Context:
-{combined_context[:2000]}
+            # Simplified prompt for better response
+            prompt = f"""You are evaluating factual consistency. Compare the answer against the context.
 
-Answer:
-{answer[:1000]}
+CONTEXT:
+{combined_context[:1500]}
 
-Rate the faithfulness on a scale of 0 to 1, where:
-- 1.0 = All claims in the answer are supported by the context
-- 0.5 = Some claims are supported, others are not
-- 0.0 = No claims are supported by the context
+ANSWER:
+{answer[:800]}
 
-Respond with ONLY a number between 0 and 1 (e.g., 0.85)."""
+INSTRUCTIONS:
+- Score 1.0 if all claims in the answer are supported by the context
+- Score 0.5 if some claims are supported
+- Score 0.0 if no claims are supported
+
+Respond with ONLY a single number between 0.0 and 1.0 (example: 0.85)
+Do not include any other text."""
 
             response = self.client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": "You are an expert at evaluating factual consistency. Respond only with a number."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system", 
+                        "content": "You are an evaluation expert. Respond with ONLY a number between 0 and 1."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
                 ],
-                temperature=0.1,
-                max_tokens=10
+                temperature=0.0,  # Changed from 0.1 for more consistent output
+                max_tokens=5       # Changed from 10 to force shorter response
             )
             
             score_text = response.choices[0].message.content.strip()
             
-            # Extract number from response
-            numbers = re.findall(r'0?\.\d+|1\.0|0|1', score_text)
-            score = float(numbers[0]) if numbers else 0.5
+            # Try to convert directly to float
+            try:
+                score = float(score_text)
+                return np.clip(score, 0.0, 1.0)
+            except ValueError:
+                pass
             
-            return np.clip(score, 0.0, 1.0)
-        
+            # Extract number from text using regex
+            patterns = [
+                r'(\d+\.\d+)',  # Matches 0.85, 1.0
+                r'(\d+)',       # Matches 0, 1
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, score_text)
+                if matches:
+                    score = float(matches[0])
+                    return np.clip(score, 0.0, 1.0)
+            
+            # Keyword fallback
+            score_text_lower = score_text.lower()
+            if 'all' in score_text_lower or 'fully' in score_text_lower or 'completely' in score_text_lower:
+                return 1.0
+            elif 'some' in score_text_lower or 'partially' in score_text_lower or 'most' in score_text_lower:
+                return 0.7
+            elif 'few' in score_text_lower or 'little' in score_text_lower:
+                return 0.3
+            elif 'no' in score_text_lower or 'none' in score_text_lower:
+                return 0.0
+            
+            # Default fallback
+            return 0.5
+            
         except Exception as e:
             print(f"Error evaluating faithfulness: {e}")
             return 0.5
@@ -101,14 +137,29 @@ Respond with ONLY a number between 0 and 1 (e.g., 0.92)."""
             response = self.client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": "You are an expert at evaluating answer relevancy. Respond only with a number."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system", 
+                        "content": "You are an expert at evaluating answer relevancy. Respond only with a number."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
                 ],
                 temperature=0.1,
                 max_tokens=10
             )
             
             score_text = response.choices[0].message.content.strip()
+            
+            # Try direct conversion
+            try:
+                score = float(score_text)
+                return np.clip(score, 0.0, 1.0)
+            except ValueError:
+                pass
+            
+            # Extract using regex
             numbers = re.findall(r'0?\.\d+|1\.0|0|1', score_text)
             score = float(numbers[0]) if numbers else 0.5
             
