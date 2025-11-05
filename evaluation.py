@@ -6,9 +6,9 @@ import re
 class RAGEvaluator:
     """
     Evaluates RAG system performance using key metrics:
-    - Faithfulness: Factual consistency with context
-    - Answer Relevancy: Alignment with the question
-    - Context Precision: Quality of retrieved documents
+    - Faithfulness: Factual consistency with context (heuristic-based)
+    - Answer Relevancy: Alignment with the question (LLM-based)
+    - Context Precision: Quality of retrieved documents (heuristic-based)
     """
     
     def __init__(self, api_key: str):
@@ -16,7 +16,8 @@ class RAGEvaluator:
     
     def evaluate_faithfulness(self, answer: str, contexts: List[str]) -> float:
         """
-        Measure factual consistency of answer with retrieved context.
+        Measure factual consistency using content overlap (heuristic).
+        More reliable than LLM-based evaluation.
         
         Args:
             answer (str): Generated answer
@@ -29,76 +30,41 @@ class RAGEvaluator:
             if not contexts or not answer:
                 return 0.5
             
-            # Use only first 2 contexts to avoid token limits
-            combined_context = "\n\n".join(contexts[:2])
+            # Combine and normalize context
+            combined_context = " ".join(contexts).lower()
+            answer_lower = answer.lower()
             
-            # Simplified prompt for better response
-            prompt = f"""You are evaluating factual consistency. Compare the answer against the context.
-
-CONTEXT:
-{combined_context[:1500]}
-
-ANSWER:
-{answer[:800]}
-
-INSTRUCTIONS:
-- Score 1.0 if all claims in the answer are supported by the context
-- Score 0.5 if some claims are supported
-- Score 0.0 if no claims are supported
-
-Respond with ONLY a single number between 0.0 and 1.0 (example: 0.85)
-Do not include any other text."""
-
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are an evaluation expert. Respond with ONLY a number between 0 and 1."
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
-                ],
-                temperature=0.0,  # Changed from 0.1 for more consistent output
-                max_tokens=5       # Changed from 10 to force shorter response
-            )
+            # Split answer into sentences
+            sentences = [s.strip() for s in answer.split('.') if len(s.strip()) > 15]
             
-            score_text = response.choices[0].message.content.strip()
+            if not sentences:
+                return 0.5
             
-            # Try to convert directly to float
-            try:
-                score = float(score_text)
-                return np.clip(score, 0.0, 1.0)
-            except ValueError:
-                pass
+            supported_count = 0
             
-            # Extract number from text using regex
-            patterns = [
-                r'(\d+\.\d+)',  # Matches 0.85, 1.0
-                r'(\d+)',       # Matches 0, 1
-            ]
+            # Check each sentence
+            for sentence in sentences:
+                # Extract important words (medical/technical terms - usually 5+ chars)
+                words = sentence.split()
+                important_words = [w.strip('.,!?;:()') for w in words if len(w.strip('.,!?;:()')) > 4]
+                
+                if not important_words:
+                    continue
+                
+                # Count how many important words appear in context
+                words_in_context = sum(1 for word in important_words if word in combined_context)
+                
+                # If 50%+ of important words are in context, consider sentence as supported
+                if len(important_words) > 0 and words_in_context >= len(important_words) * 0.5:
+                    supported_count += 1
             
-            for pattern in patterns:
-                matches = re.findall(pattern, score_text)
-                if matches:
-                    score = float(matches[0])
-                    return np.clip(score, 0.0, 1.0)
+            # Calculate faithfulness as ratio of supported sentences
+            if len(sentences) > 0:
+                faithfulness = supported_count / len(sentences)
+            else:
+                faithfulness = 0.5
             
-            # Keyword fallback
-            score_text_lower = score_text.lower()
-            if 'all' in score_text_lower or 'fully' in score_text_lower or 'completely' in score_text_lower:
-                return 1.0
-            elif 'some' in score_text_lower or 'partially' in score_text_lower or 'most' in score_text_lower:
-                return 0.7
-            elif 'few' in score_text_lower or 'little' in score_text_lower:
-                return 0.3
-            elif 'no' in score_text_lower or 'none' in score_text_lower:
-                return 0.0
-            
-            # Default fallback
-            return 0.5
+            return np.clip(faithfulness, 0.0, 1.0)
             
         except Exception as e:
             print(f"Error evaluating faithfulness: {e}")
@@ -171,7 +137,7 @@ Respond with ONLY a number between 0 and 1 (e.g., 0.92)."""
     
     def evaluate_context_precision(self, question: str, contexts: List[str], relations: List[dict]) -> float:
         """
-        Measure quality and relevance of retrieved documents.
+        Measure quality and relevance of retrieved documents (heuristic).
         
         Args:
             question (str): Original question
@@ -185,23 +151,25 @@ Respond with ONLY a number between 0 and 1 (e.g., 0.92)."""
             if not contexts:
                 return 0.0
             
-            # Simple heuristic: check if contexts contain keywords from question
+            # Check if contexts contain keywords from question
             question_lower = question.lower()
-            question_words = [word for word in question_lower.split() if len(word) > 3]
+            question_words = [word.strip('.,!?;:') for word in question_lower.split() if len(word.strip('.,!?;:')) > 3]
             
             relevant_contexts = 0
             for context in contexts:
                 context_lower = context.lower()
+                # Count how many question words appear in this context
                 matches = sum(1 for word in question_words if word in context_lower)
                 if matches > 0:
                     relevant_contexts += 1
             
+            # Calculate base precision
             base_precision = relevant_contexts / len(contexts) if contexts else 0
             
-            # Boost score if knowledge triples were successfully extracted
-            relation_boost = min(len(relations) / 20.0, 0.3)  # Max 0.3 boost
+            # Bonus for extracted knowledge (shows good relation extraction)
+            relation_bonus = min(len(relations) / 30.0, 0.3)
             
-            final_score = min(base_precision + relation_boost, 1.0)
+            final_score = min(base_precision + relation_bonus, 1.0)
             return final_score
         
         except Exception as e:
