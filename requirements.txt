@@ -1,7 +1,6 @@
-streamlit==1.31.0
+streamlit==1.39.0
 groq==0.4.2
-biopython==1.83
-langchain-core==0.2.38
-pydantic==2.6.1
-pandas==2.2.0
-numpy==1.26.3
+biopython==1.84
+pydantic==2.10.3
+pandas==2.2.3
+numpy==2.0.2
